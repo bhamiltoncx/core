@@ -215,7 +215,17 @@ async def handle_devices_execute(hass, data, payload):
     )
 
     for entity_id, result in zip(executions, execute_results):
-        if result is not None:
+        if result is False:
+            # Timed out waiting for results -- e.g., a cover entity taking too long to open or close.
+            # Return a pending result.
+            _LOGGER.debug(
+                "Timed out waiting for %s, returning PENDING status", entity_id
+            )
+            results[entity_id] = {
+                "ids": [entity_id],
+                "status": "PENDING",
+            }
+        elif result is not None:
             results[entity_id] = result
 
     final_results = list(results.values())
