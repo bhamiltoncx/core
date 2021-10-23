@@ -155,6 +155,8 @@ COMMAND_CHARGE = f"{PREFIX_COMMANDS}Charge"
 
 TRAITS = []
 
+ASYNC_CALL_LIMIT = 2.0
+
 
 def register_trait(trait):
     """Decorate a function to register a trait."""
@@ -1895,8 +1897,13 @@ class OpenCloseTrait(_Trait):
             ):
                 _verify_pin_challenge(data, self.state, challenge)
 
-            await self.hass.services.async_call(
-                cover.DOMAIN, service, svc_params, blocking=True, context=data.context
+            return await self.hass.services.async_call(
+                cover.DOMAIN,
+                service,
+                svc_params,
+                blocking=True,
+                limit=ASYNC_CALL_LIMIT,
+                context=data.context,
             )
 
 
