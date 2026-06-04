@@ -117,6 +117,7 @@ class BraviaTVCoordinator(DataUpdateCoordinator[None]):
         self.volume_level: float | None = None
         self.volume_target: str | None = None
         self.volume_muted = False
+        self.sound_output: str | None = None
         self.is_on = False
         self.connected = False
         self.skipped_updates = 0
@@ -221,9 +222,17 @@ class BraviaTVCoordinator(DataUpdateCoordinator[None]):
 
     async def async_update_volume(self) -> None:
         """Update volume information."""
+        self.sound_output = await self.client.get_sound_settings()
         volume_info = await self.client.get_volume_info()
         if (volume_level := volume_info.get("volume")) is not None:
-            self.volume_level = volume_level / 100
+            # When audio is routed to an external system (e.g. HDMI ARC), the TV
+            # only reports its own speaker volume, not the external device's volume.
+            # Preserve our locally-tracked level so the slider stays in sync with
+            # the IRCC steps we sent instead of snapping back to the speaker level.
+            if self.sound_output != "audioSystem":
+                self.volume_level = volume_level / 100
+            elif self.volume_level is None:
+                self.volume_level = volume_level / 100
             self.volume_muted = volume_info.get("mute", False)
             self.volume_target = volume_info.get("target")
 
@@ -320,17 +329,35 @@ class BraviaTVCoordinator(DataUpdateCoordinator[None]):
     @catch_braviatv_errors
     async def async_set_volume_level(self, volume: float) -> None:
         """Set volume level, range 0..1."""
-        await self.client.volume_level(round(volume * 100))
+        if self.sound_output == "audioSystem":
+            current = self.volume_level or 0.0
+            steps = round((volume - current) * 100)
+            command = "VolumeUp" if steps > 0 else "VolumeDown"
+            for _ in range(abs(steps)):
+                await self.client.send_command(command)
+            self.volume_level = volume
+        else:
+            await self.client.volume_level(round(volume * 100))
 
     @catch_braviatv_errors
     async def async_volume_up(self) -> None:
         """Send volume up command to device."""
-        await self.client.volume_up()
+        if self.sound_output == "audioSystem":
+            await self.client.send_command("VolumeUp")
+            if self.volume_level is not None:
+                self.volume_level = min(1.0, self.volume_level + 0.01)
+        else:
+            await self.client.volume_up()
 
     @catch_braviatv_errors
     async def async_volume_down(self) -> None:
         """Send volume down command to device."""
-        await self.client.volume_down()
+        if self.sound_output == "audioSystem":
+            await self.client.send_command("VolumeDown")
+            if self.volume_level is not None:
+                self.volume_level = max(0.0, self.volume_level - 0.01)
+        else:
+            await self.client.volume_down()
 
     @catch_braviatv_errors
     async def async_volume_mute(self, mute: bool) -> None:
