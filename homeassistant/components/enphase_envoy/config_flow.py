@@ -10,6 +10,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import (
     SOURCE_REAUTH,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlowWithReload,
@@ -153,6 +154,25 @@ class EnphaseConfigFlow(ConfigFlow, domain=DOMAIN):
         self.protovers = discovery_info.properties.get("protovers")
         await self.async_set_unique_id(serial)
         self.ip_address = discovery_info.host
+        if (
+            entry := self.hass.config_entries.async_entry_for_domain_unique_id(
+                self.handler, serial
+            )
+        ) and (
+            entry.data.get(CONF_HOST) != self.ip_address
+            and entry.state is ConfigEntryState.LOADED
+            and entry.runtime_data.last_update_success
+        ):
+            # A dual-homed Envoy announces itself from both interfaces; adopting
+            # every discovered address would flap the entry between them. Only
+            # take a new address once the configured one stops working.
+            _LOGGER.debug(
+                "Zeroconf ip %s ignored, entry with serial %s is online at %s",
+                self.ip_address,
+                serial,
+                entry.data[CONF_HOST],
+            )
+            return self.async_abort(reason="already_configured")
         self._abort_if_unique_id_configured({CONF_HOST: self.ip_address})
         _LOGGER.debug(
             "Zeroconf ip %s, fw %s, no existing entry with serial %s",

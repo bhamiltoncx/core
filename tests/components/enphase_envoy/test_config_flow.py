@@ -4,6 +4,7 @@ from ipaddress import ip_address
 import logging
 from unittest.mock import AsyncMock
 
+from freezegun.api import FrozenDateTimeFactory
 from pyenphase import EnvoyAuthenticationError, EnvoyError
 import pytest
 
@@ -14,7 +15,8 @@ from homeassistant.components.enphase_envoy.const import (
     OPTION_DISABLE_KEEP_ALIVE,
     OPTION_DISABLE_KEEP_ALIVE_DEFAULT_VALUE,
 )
-from homeassistant.config_entries import SOURCE_USER, SOURCE_ZEROCONF
+from homeassistant.components.enphase_envoy.coordinator import SCAN_INTERVAL
+from homeassistant.config_entries import SOURCE_USER, SOURCE_ZEROCONF, ConfigEntryState
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -22,7 +24,7 @@ from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from . import setup_integration
 
-from tests.common import MockConfigEntry
+from tests.common import MockConfigEntry, async_fire_time_changed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -248,14 +250,13 @@ async def test_form_host_already_exists(
     assert config_entry.data[CONF_PASSWORD] == "changed-password"
 
 
-@pytest.mark.usefixtures("mock_setup_entry")
 async def test_zeroconf_serial_already_exists(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     mock_envoy: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Test serial number already exists from zeroconf."""
+    """Test discovery of a new ip is ignored while the configured one works."""
     _LOGGER.setLevel(logging.DEBUG)
     await setup_integration(hass, config_entry)
     result = await hass.config_entries.flow.async_init(
@@ -274,8 +275,75 @@ async def test_zeroconf_serial_already_exists(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
 
-    assert config_entry.data[CONF_HOST] == "4.4.4.4"
+    assert config_entry.data[CONF_HOST] == "1.1.1.1"
     assert "Zeroconf ip 4 processing 4.4.4.4, current hosts: {'1.1.1.1'}" in caplog.text
+
+
+async def test_zeroconf_serial_already_exists_update_failing(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    mock_envoy: AsyncMock,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test discovery of a new ip is used when the configured one stopped working."""
+    await setup_integration(hass, config_entry)
+
+    mock_envoy.update.side_effect = EnvoyError
+    freezer.tick(SCAN_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    mock_envoy.update.side_effect = None
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_ZEROCONF},
+        data=ZeroconfServiceInfo(
+            ip_address=ip_address("4.4.4.4"),
+            ip_addresses=[ip_address("4.4.4.4")],
+            hostname="mock_hostname",
+            name="mock_name",
+            port=None,
+            properties={"serialnum": "1234"},
+            type="mock_type",
+        ),
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+    assert config_entry.data[CONF_HOST] == "4.4.4.4"
+
+
+async def test_zeroconf_serial_already_exists_setup_retry(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    mock_envoy: AsyncMock,
+) -> None:
+    """Test discovery of a new ip is used when the entry failed to set up."""
+    mock_envoy.setup.side_effect = EnvoyError
+    await setup_integration(
+        hass, config_entry, expected_state=ConfigEntryState.SETUP_RETRY
+    )
+
+    mock_envoy.setup.side_effect = None
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_ZEROCONF},
+        data=ZeroconfServiceInfo(
+            ip_address=ip_address("4.4.4.4"),
+            ip_addresses=[ip_address("4.4.4.4")],
+            hostname="mock_hostname",
+            name="mock_name",
+            port=None,
+            properties={"serialnum": "1234"},
+            type="mock_type",
+        ),
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+    assert config_entry.data[CONF_HOST] == "4.4.4.4"
 
 
 @pytest.mark.usefixtures("mock_setup_entry")
