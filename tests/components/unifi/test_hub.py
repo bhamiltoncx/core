@@ -47,6 +47,7 @@ async def test_hub_setup(
         config_entry,
         [
             Platform.BUTTON,
+            Platform.DATE,
             Platform.DEVICE_TRACKER,
             Platform.IMAGE,
             Platform.LIGHT,
