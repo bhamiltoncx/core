@@ -1,5 +1,6 @@
 """UniFi Network abstraction."""
 
+from contextlib import suppress
 from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING
 
@@ -97,7 +98,10 @@ class UnifiHub:
         if (sysinfo := next(iter(self.api.system_information.values()), None)) and (
             time_zone := sysinfo.raw.get("timezone")
         ):
-            self.time_zone = await dt_util.async_get_time_zone(time_zone)
+            # Anything that isn't a loadable zone name falls back to
+            # Home Assistant's time zone.
+            with suppress(TypeError, ValueError):
+                self.time_zone = await dt_util.async_get_time_zone(time_zone)
         self._entity_helper.initialize()
 
         assert self.config.entry.unique_id is not None
