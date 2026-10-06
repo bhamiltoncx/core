@@ -1,6 +1,7 @@
 """UniFi Network abstraction."""
 
-from datetime import datetime
+from contextlib import suppress
+from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING
 
 import aiounifi
@@ -20,6 +21,7 @@ from homeassistant.helpers.device_registry import (
     DeviceInfo,
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.util import dt as dt_util
 
 from ..const import ATTR_MANUFACTURER, CONF_SITE_ID, DOMAIN, PLATFORMS
 from .config import UnifiConfig
@@ -50,6 +52,8 @@ class UnifiHub:
 
         self.site = config_entry.data[CONF_SITE_ID]
         self.is_admin = False
+        self.time_zone: tzinfo | None = None
+        """The controller's time zone. None means use Home Assistant's."""
 
     @property
     def available(self) -> bool:
@@ -91,6 +95,13 @@ class UnifiHub:
     async def initialize(self) -> None:
         """Set up a UniFi Network instance."""
         await self.entity_loader.initialize()
+        if (sysinfo := next(iter(self.api.system_information.values()), None)) and (
+            time_zone := sysinfo.raw.get("timezone")
+        ):
+            # Anything that isn't a loadable zone name falls back to
+            # Home Assistant's time zone.
+            with suppress(TypeError, ValueError):
+                self.time_zone = await dt_util.async_get_time_zone(time_zone)
         self._entity_helper.initialize()
 
         assert self.config.entry.unique_id is not None
