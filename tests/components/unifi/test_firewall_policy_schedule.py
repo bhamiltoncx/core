@@ -17,6 +17,7 @@ from homeassistant.components.unifi.firewall_policy_schedule import (
     build_schedule,
     parse_date,
     parse_time,
+    schedule_days,
     schedule_uses_times,
 )
 from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONTENT_TYPE_JSON
@@ -200,7 +201,7 @@ CUSTOM = {
                 "time_range_end": "18:00",
             },
         ),
-        # Changing between the modes with days starts over: every day, timed.
+        # Changing between the modes with days keeps the days and all day.
         (
             WEEKLY_ALL_DAY,
             {"mode": FirewallPolicyScheduleMode.CUSTOM},
@@ -208,7 +209,28 @@ CUSTOM = {
                 "mode": "CUSTOM",
                 "date_start": "2026-01-16",
                 "date_end": "2026-01-17",
-                "repeat_on_days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                "repeat_on_days": ["fri"],
+                "time_all_day": True,
+            },
+        ),
+        (
+            CUSTOM,
+            {"mode": FirewallPolicyScheduleMode.EVERY_WEEK},
+            {
+                "mode": "EVERY_WEEK",
+                "repeat_on_days": ["mon", "fri"],
+                "time_all_day": False,
+                "time_range_start": "20:00",
+                "time_range_end": "06:00",
+            },
+        ),
+        # All day off doesn't send back a malformed time left in the schedule.
+        (
+            {**WEEKLY_ALL_DAY, "time_range_start": "bad"},
+            {"all_day": False},
+            {
+                "mode": "EVERY_WEEK",
+                "repeat_on_days": ["fri"],
                 "time_all_day": False,
                 "time_range_start": "09:00",
                 "time_range_end": "12:00",
@@ -255,6 +277,62 @@ CUSTOM = {
                 "time_all_day": False,
                 "time_range_start": "20:00",
                 "time_range_end": "06:00",
+            },
+        ),
+        # Days are replaced and sent Monday first.
+        (
+            WEEKLY,
+            {"days": {"fri", "mon"}},
+            {
+                "mode": "EVERY_WEEK",
+                "repeat_on_days": ["mon", "fri"],
+                "time_all_day": False,
+                "time_range_start": "15:00",
+                "time_range_end": "17:00",
+            },
+        ),
+        # All day on drops the times.
+        (
+            WEEKLY,
+            {"all_day": True},
+            {
+                "mode": "EVERY_WEEK",
+                "repeat_on_days": ["mon", "wed"],
+                "time_all_day": True,
+            },
+        ),
+        # All day off on a schedule without times uses the default times.
+        (
+            WEEKLY_ALL_DAY,
+            {"all_day": False},
+            {
+                "mode": "EVERY_WEEK",
+                "repeat_on_days": ["fri"],
+                "time_all_day": False,
+                "time_range_start": "09:00",
+                "time_range_end": "12:00",
+            },
+        ),
+        # Days the library doesn't know are dropped.
+        (
+            {**WEEKLY, "repeat_on_days": ["MON", "wed", "someday"]},
+            {"end": time(18, 0)},
+            {
+                "mode": "EVERY_WEEK",
+                "repeat_on_days": ["wed"],
+                "time_all_day": False,
+                "time_range_start": "15:00",
+                "time_range_end": "18:00",
+            },
+        ),
+        # Days and all day mean nothing outside the modes that have them.
+        (
+            EVERY_DAY,
+            {"days": {"mon"}, "all_day": True},
+            {
+                "mode": "EVERY_DAY",
+                "time_range_start": "21:00",
+                "time_range_end": "08:00",
             },
         ),
         # An all-day schedule has no times, and a stray date isn't carried.
@@ -319,6 +397,21 @@ def test_parse_time(value: object, expected: time | None) -> None:
 def test_parse_date(value: object, expected: date | None) -> None:
     """Malformed dates give None."""
     assert parse_date(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("schedule", "expected"),
+    [
+        (WEEKLY, ["mon", "wed"]),
+        ({**WEEKLY, "repeat_on_days": []}, []),
+        ({**WEEKLY, "repeat_on_days": ["MON", "sun", "tue"]}, ["tue", "sun"]),
+        ({**WEEKLY, "repeat_on_days": "mon"}, []),
+        ({"mode": "EVERY_WEEK"}, []),
+    ],
+)
+def test_schedule_days(schedule: dict[str, Any], expected: list[str]) -> None:
+    """Known days are returned Monday first; anything else is ignored."""
+    assert schedule_days(schedule) == expected
 
 
 SELECT = "select.unifi_network_block_streaming_schedule"
@@ -580,3 +673,123 @@ async def test_rejected_switch_write_leaves_the_policy_unchanged(
     api = config_entry_setup.runtime_data.api
     assert api.firewall_policies[FIREWALL_POLICY["_id"]].enabled is True
     assert hass.states.get(SWITCH).state == "on"
+
+
+DAY_SWITCH = "switch.unifi_network_block_streaming_schedule_{}"
+ALL_DAY_SWITCH = "switch.unifi_network_block_streaming_schedule_all_day"
+
+
+@pytest.mark.parametrize(
+    "firewall_policy_payload",
+    [
+        [
+            {
+                **FIREWALL_POLICY,
+                "schedule": {
+                    "mode": "EVERY_WEEK",
+                    "repeat_on_days": [],
+                    "time_all_day": False,
+                    "time_range_start": "21:30",
+                    "time_range_end": "08:30",
+                },
+            }
+        ]
+    ],
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_schedule_days_step_by_step(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+    firewall_policy_payload: list[dict[str, Any]],
+) -> None:
+    """Days and all day can be set on a schedule that starts with no days."""
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock, mock_requests, config_entry, firewall_policy_payload[0]
+    )
+    for day in ("monday", "tuesday", "sunday"):
+        assert hass.states.get(DAY_SWITCH.format(day)).state == "off"
+
+    await _call(hass, "switch", "turn_on", DAY_SWITCH.format("tuesday"))
+    assert controller.policy["schedule"]["repeat_on_days"] == ["tue"]
+    assert hass.states.get(DAY_SWITCH.format("tuesday")).state == "on"
+    assert hass.states.get(DAY_SWITCH.format("monday")).state == "off"
+
+    await _call(hass, "switch", "turn_on", ALL_DAY_SWITCH)
+    assert controller.policy["schedule"] == {
+        "mode": "EVERY_WEEK",
+        "repeat_on_days": ["tue"],
+        "time_all_day": True,
+    }
+    assert hass.states.get(ALL_DAY_SWITCH).state == "on"
+    assert hass.states.get(START_TIME).state == "unknown"
+
+    await _call(hass, "switch", "turn_off", ALL_DAY_SWITCH)
+    assert controller.policy["schedule"] == {
+        "mode": "EVERY_WEEK",
+        "repeat_on_days": ["tue"],
+        "time_all_day": False,
+        "time_range_start": "09:00",
+        "time_range_end": "12:00",
+    }
+    assert hass.states.get(ALL_DAY_SWITCH).state == "off"
+    assert hass.states.get(START_TIME).state == "09:00:00"
+    assert len(controller.puts) == 3
+
+
+@pytest.mark.parametrize(
+    "firewall_policy_payload", [[{**FIREWALL_POLICY, "schedule": CUSTOM}]]
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_custom_schedule_day_keeps_dates(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+    firewall_policy_payload: list[dict[str, Any]],
+) -> None:
+    """Changing a day in a Custom schedule keeps its date range and times."""
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock, mock_requests, config_entry, firewall_policy_payload[0]
+    )
+
+    await _call(hass, "switch", "turn_on", DAY_SWITCH.format("wednesday"))
+
+    assert controller.policy["schedule"] == {
+        **CUSTOM,
+        "repeat_on_days": ["mon", "wed", "fri"],
+    }
+    assert hass.states.get(DAY_SWITCH.format("wednesday")).state == "on"
+
+
+@pytest.mark.parametrize(
+    "firewall_policy_payload", [[{**FIREWALL_POLICY, "schedule": WEEKLY}]]
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_simultaneous_day_and_time_writes_are_not_lost(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+    firewall_policy_payload: list[dict[str, Any]],
+) -> None:
+    """A day switch and a time changed at the same moment both take effect."""
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock,
+        mock_requests,
+        config_entry,
+        firewall_policy_payload[0],
+        put_delay=0.05,
+    )
+
+    await asyncio.gather(
+        _call(hass, "switch", "turn_on", DAY_SWITCH.format("friday")),
+        _call(hass, "time", "set_value", START_TIME, time="16:00:00"),
+    )
+
+    assert controller.policy["schedule"]["repeat_on_days"] == ["mon", "wed", "fri"]
+    assert controller.policy["schedule"]["time_range_start"] == "16:00"
