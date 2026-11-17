@@ -176,12 +176,7 @@ async def async_firewall_policy_schedule_day_control_fn(
     # A mode without days is left to aiounifi to reject.
     if current is not None and (day in current) == target:
         return
-    days = set(current or ())
-    if target:
-        days.add(day)
-    else:
-        days.discard(day)
-    await async_save_firewall_policy_schedule(hub, obj_id, days=days)
+    await async_save_firewall_policy_schedule(hub, obj_id, set_day=(day, target))
 
 
 async def async_object_oriented_network_config_control_fn(

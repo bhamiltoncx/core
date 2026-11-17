@@ -547,3 +547,52 @@ async def test_simultaneous_day_and_time_writes_are_not_lost(
 
     assert controller.policy["schedule"]["repeat_on_days"] == ["mon", "wed", "fri"]
     assert controller.policy["schedule"]["time_range_start"] == "16:00"
+
+
+@pytest.mark.parametrize("json_response", [True, False])
+@pytest.mark.parametrize("firewall_policy_payload", [[FIREWALL_POLICY]])
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_simultaneous_mode_and_day_writes_are_not_lost(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+    json_response: bool,
+) -> None:
+    """A day switch changed while the mode changes keeps the mode's days.
+
+    Changing every day to every week picks all seven days. A day switch
+    flipped at the same moment builds on those, not on the days it saw
+    before.
+    """
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock,
+        mock_requests,
+        config_entry,
+        FIREWALL_POLICY,
+        json_response=json_response,
+        put_delay=0.05,
+    )
+
+    await asyncio.gather(
+        _call(
+            hass,
+            SELECT_DOMAIN,
+            SelectService.SELECT_OPTION,
+            SELECT,
+            {SelectServiceArgument.OPTION: "every_week"},
+        ),
+        _call(hass, SWITCH_DOMAIN, SwitchService.TURN_ON, DAY_SWITCH.format("monday")),
+    )
+
+    assert controller.policy["schedule"]["mode"] == "EVERY_WEEK"
+    assert controller.policy["schedule"]["repeat_on_days"] == [
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
+    ]

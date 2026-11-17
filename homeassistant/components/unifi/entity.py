@@ -1,7 +1,7 @@
 """UniFi entity representation."""
 
 from abc import abstractmethod
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, time
 from typing import TYPE_CHECKING, Any, override
@@ -19,6 +19,7 @@ from aiounifi.models.firewall_policy import (
     FirewallPolicySchedule,
     FirewallPolicyScheduleError,
     FirewallPolicyScheduleMode,
+    FirewallPolicyScheduleSettings,
     ScheduleDatesOutOfOrderError,
     ScheduleSettingUnusedError,
     ScheduleWithoutDaysError,
@@ -107,14 +108,27 @@ async def async_save_firewall_policy_schedule(
     start_date: date | None = None,
     end_date: date | None = None,
     all_day: bool | None = None,
-    days: Collection[str] | None = None,
+    set_day: tuple[str, bool] | None = None,
 ) -> None:
     """Save a change to a firewall policy's schedule.
+
+    set_day adds a day to the schedule's days or removes it. The change is
+    made to the latest schedule, so a mode changed at the same moment keeps
+    the days it picked.
 
     "Today" is the controller's date: its clock is the one the schedule runs on.
     """
 
     def schedule_fn(current: Mapping[str, Any]) -> FirewallPolicySchedule:
+        days: set[str] | None = None
+        if set_day is not None:
+            day, on = set_day
+            # A mode without days is left to aiounifi to reject.
+            days = set(FirewallPolicyScheduleSettings.from_schedule(current).days or ())
+            if on:
+                days.add(day)
+            else:
+                days.discard(day)
         try:
             return build_schedule(
                 current,
