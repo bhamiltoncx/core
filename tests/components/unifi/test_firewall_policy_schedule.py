@@ -25,6 +25,7 @@ from homeassistant.components.unifi.coordinator import POLL_INTERVAL
 from homeassistant.const import CONF_HOST, CONTENT_TYPE_JSON, CommonServiceArgument
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
 
 from .conftest import ConfigEntryFactoryType
 from .test_sensor import FIREWALL_POLICY
@@ -53,12 +54,14 @@ class FakeController:
         policy: dict[str, Any],
         *,
         json_response: bool = True,
+        get_delay: float = 0.0,
         put_delay: float = 0.0,
     ) -> None:
         """Replace the firewall policy endpoints with stateful ones."""
         self.policy = deepcopy(policy)
         self.puts: list[dict[str, Any]] = []
         self._json_response = json_response
+        self._get_delay = get_delay
         self._put_delay = put_delay
         url = (
             f"https://{config_entry.data[CONF_HOST]}:1234"
@@ -71,10 +74,14 @@ class FakeController:
         mock_requests()
 
     async def _get(self, method: str, url: URL, data: Any) -> AiohttpClientMockResponse:
+        # The policy as it was when the request arrived, even if it is slow.
+        policy = deepcopy(self.policy)
+        if self._get_delay:
+            await asyncio.sleep(self._get_delay)
         return AiohttpClientMockResponse(
             method,
             url,
-            json=[deepcopy(self.policy)],
+            json=[policy],
             headers={"content-type": CONTENT_TYPE_JSON},
         )
 
@@ -229,6 +236,50 @@ async def test_simultaneous_writes_are_not_lost(
     assert controller.policy["enabled"] is False
     assert controller.policy["schedule"] == {"mode": "ALWAYS"}
     assert hass.states.get(SELECT).state == "always"
+    assert hass.states.get(SWITCH).state == "off"
+
+
+@pytest.mark.parametrize("firewall_policy_payload", [[FIREWALL_POLICY]])
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_slow_refresh_does_not_undo_a_write(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+) -> None:
+    """A refresh fetched before a write doesn't put the old policy back.
+
+    Otherwise a write made before the next refresh would send the old policy
+    to the controller.
+    """
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock, mock_requests, config_entry, FIREWALL_POLICY, get_delay=0.05
+    )
+
+    async def turn_off_during_refresh() -> None:
+        await asyncio.sleep(0.01)
+        await _call(hass, SWITCH_DOMAIN, SwitchService.TURN_OFF, SWITCH)
+
+    async def select_after_refresh() -> None:
+        # After the slow refresh is back, before the switch's own one is.
+        await asyncio.sleep(0.07)
+        await _call(
+            hass,
+            SELECT_DOMAIN,
+            SelectService.SELECT_OPTION,
+            SELECT,
+            {SelectServiceArgument.OPTION: "always"},
+        )
+
+    # Start a poll, and write while it waits for the controller. The clock
+    # isn't frozen, so the controller's delays pass.
+    async_fire_time_changed(hass, dt_util.utcnow() + POLL_INTERVAL)
+    await asyncio.gather(turn_off_during_refresh(), select_after_refresh())
+    await hass.async_block_till_done()
+
+    assert controller.policy["enabled"] is False
+    assert controller.policy["schedule"] == {"mode": "ALWAYS"}
     assert hass.states.get(SWITCH).state == "off"
 
 

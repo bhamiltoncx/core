@@ -1,6 +1,7 @@
 """UniFi Network data update coordinator."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 import json
 from typing import TYPE_CHECKING, override
@@ -51,8 +52,12 @@ class UnifiDataUpdateCoordinator[HandlerT: APIHandler](
         handler: HandlerT,
         *,
         disable_polling_on_endpoint_not_found: bool = False,
+        update_fn: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        """Initialize coordinator."""
+        """Initialize coordinator.
+
+        update_fn refreshes the handler, by default with its own update.
+        """
         supports_websocket = bool(handler.process_messages or handler.remove_messages)
         super().__init__(
             hub.hass,
@@ -62,6 +67,7 @@ class UnifiDataUpdateCoordinator[HandlerT: APIHandler](
             update_interval=None if supports_websocket else POLL_INTERVAL,
         )
         self._handler = handler
+        self._update_fn = update_fn
         self._supports_websocket = supports_websocket
         self._connection = hub.connection
         self._disable_polling_on_endpoint_not_found = (
@@ -87,7 +93,10 @@ class UnifiDataUpdateCoordinator[HandlerT: APIHandler](
         """Update data from the API handler."""
         try:
             async with asyncio.timeout(UPDATE_TIMEOUT):
-                await self._handler.update()
+                if self._update_fn is not None:
+                    await self._update_fn()
+                else:
+                    await self._handler.update()
         except EndpointNotFound as err:
             if (
                 self._disable_polling_on_endpoint_not_found
@@ -146,7 +155,10 @@ class UnifiDataUpdateCoordinator[HandlerT: APIHandler](
         name = type(self._handler).__name__
         try:
             async with asyncio.timeout(UPDATE_TIMEOUT):
-                await self._handler.update()
+                if self._update_fn is not None:
+                    await self._update_fn()
+                else:
+                    await self._handler.update()
         except SESSION_CHECK_ERRORS as err:
             self._connection.verify_session(err)
         except aiounifi.AiounifiException as err:

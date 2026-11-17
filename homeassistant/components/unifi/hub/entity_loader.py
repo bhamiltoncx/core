@@ -54,7 +54,9 @@ class UnifiEntityLoader:
             id(hub.api.dpi_apps): UnifiDataUpdateCoordinator(hub, hub.api.dpi_apps),
             id(hub.api.dpi_groups): UnifiDataUpdateCoordinator(hub, hub.api.dpi_groups),
             id(hub.api.firewall_policies): UnifiDataUpdateCoordinator(
-                hub, hub.api.firewall_policies
+                hub,
+                hub.api.firewall_policies,
+                update_fn=hub.async_refresh_firewall_policies,
             ),
             id(hub.api.object_oriented_network_configs): UnifiDataUpdateCoordinator(
                 hub,
