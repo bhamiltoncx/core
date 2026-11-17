@@ -1,7 +1,6 @@
 """UniFi Network entity helper."""
 
 import asyncio
-from collections import defaultdict
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -70,10 +69,14 @@ class UnifiEntityHelper:
         schedule_fn: Callable[[Mapping[str, Any]], FirewallPolicySchedule]
         | None = None,
     ) -> None:
-        """Save a change to a firewall policy, one write per policy at a time."""
+        """Save a change to a firewall policy, one write at a time."""
         await self._firewall_policy_command.save(
             obj_id, enabled=enabled, schedule_fn=schedule_fn
         )
+
+    async def refresh_firewall_policies(self) -> None:
+        """Refresh firewall policies, taking turns with writes."""
+        await self._firewall_policy_command.refresh()
 
 
 class UnifiEntityHeartbeat:
@@ -179,8 +182,10 @@ class UnifiFirewallPolicyCommand:
 
     Saving a firewall policy sends the whole policy, built from the cached
     copy. Entities on different platforms can change the same policy, so
-    writes to a policy run one at a time, each starting from the policy as
-    the one before it left it.
+    writes run one at a time, each starting from the policy as the one
+    before it left it. Refreshes take turns with them too: a refresh that
+    fetched before a write landed would otherwise put the old policy back
+    in the cache, and the next write would send it.
 
     Unlike PoE commands these aren't delayed and batched: the caller needs
     to know whether its own change was accepted.
@@ -190,7 +195,12 @@ class UnifiFirewallPolicyCommand:
         """Initialize firewall policy command helper."""
         self.api = api
 
-        self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._lock = asyncio.Lock()
+
+    async def refresh(self) -> None:
+        """Refresh the cached firewall policies."""
+        async with self._lock:
+            await self.api.firewall_policies.update()
 
     async def save(
         self,
@@ -204,7 +214,7 @@ class UnifiFirewallPolicyCommand:
 
         schedule_fn builds the new schedule from the current one.
         """
-        async with self._locks[obj_id]:
+        async with self._lock:
             policies = self.api.firewall_policies
             policy = policies[obj_id]
             schedule = None

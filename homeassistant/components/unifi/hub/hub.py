@@ -109,10 +109,14 @@ class UnifiHub:
         schedule_fn: Callable[[Mapping[str, Any]], FirewallPolicySchedule]
         | None = None,
     ) -> None:
-        """Save a change to a firewall policy, one write per policy at a time."""
+        """Save a change to a firewall policy, one write at a time."""
         await self._entity_helper.save_firewall_policy(
             obj_id, enabled=enabled, schedule_fn=schedule_fn
         )
+
+    async def async_refresh_firewall_policies(self) -> None:
+        """Refresh firewall policies, taking turns with writes."""
+        await self._entity_helper.refresh_firewall_policies()
 
     @property
     def signal_reachable(self) -> str:
