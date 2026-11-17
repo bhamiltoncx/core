@@ -1,9 +1,10 @@
 """UniFi entity representation."""
 
 from abc import abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, override
+from datetime import date, time
+from typing import TYPE_CHECKING, Any, override
 
 import aiounifi
 from aiounifi.interfaces.api_handlers import (
@@ -14,9 +15,19 @@ from aiounifi.interfaces.api_handlers import (
 )
 from aiounifi.models.api import ApiItem
 from aiounifi.models.event import Event, EventKey
+from aiounifi.models.firewall_policy import (
+    FirewallPolicySchedule,
+    FirewallPolicyScheduleError,
+    FirewallPolicyScheduleMode,
+    ScheduleDatesOutOfOrderError,
+    ScheduleSettingUnusedError,
+    ScheduleWithoutDaysError,
+    build_schedule,
+)
 
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
 from homeassistant.core import callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import (
     CONNECTION_NETWORK_MAC,
@@ -25,6 +36,7 @@ from homeassistant.helpers.device_registry import (
 )
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity, EntityDescription
+from homeassistant.util import dt as dt_util
 
 from .const import ATTR_MANUFACTURER, DOMAIN
 from .coordinator import UnifiDataUpdateCoordinator
@@ -76,6 +88,52 @@ def async_firewall_policy_supported_fn(hub: UnifiHub, obj_id: str) -> bool:
     """Check if firewall policy can be controlled."""
     policy = hub.api.firewall_policies[obj_id]
     return not policy.predefined and policy.name != ""
+
+
+SCHEDULE_ERROR_TRANSLATION_KEYS: dict[type[FirewallPolicyScheduleError], str] = {
+    ScheduleDatesOutOfOrderError: "schedule_dates_out_of_order",
+    ScheduleSettingUnusedError: "schedule_setting_unused_in_mode",
+    ScheduleWithoutDaysError: "schedule_needs_a_day",
+}
+
+
+async def async_save_firewall_policy_schedule(
+    hub: UnifiHub,
+    obj_id: str,
+    *,
+    mode: FirewallPolicyScheduleMode | None = None,
+    start_time: time | None = None,
+    end_time: time | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    all_day: bool | None = None,
+    days: Collection[str] | None = None,
+) -> None:
+    """Save a change to a firewall policy's schedule.
+
+    "Today" is the controller's date: its clock is the one the schedule runs on.
+    """
+
+    def schedule_fn(current: Mapping[str, Any]) -> FirewallPolicySchedule:
+        try:
+            return build_schedule(
+                current,
+                dt_util.now(hub.time_zone).date(),
+                mode=mode,
+                start_time=start_time,
+                end_time=end_time,
+                start_date=start_date,
+                end_date=end_date,
+                all_day=all_day,
+                days=days,
+            )
+        except FirewallPolicyScheduleError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key=SCHEDULE_ERROR_TRANSLATION_KEYS[type(err)],
+            ) from err
+
+    await hub.async_save_firewall_policy(obj_id, schedule_fn=schedule_fn)
 
 
 @callback

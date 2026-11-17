@@ -14,12 +14,22 @@ from pytest_homeassistant.test_util.aiohttp import (
 )
 from yarl import URL
 
+from homeassistant.components.date import (
+    DOMAIN as DATE_DOMAIN,
+    DateService,
+    DateServiceArgument,
+)
 from homeassistant.components.select import (
     DOMAIN as SELECT_DOMAIN,
     SelectService,
     SelectServiceArgument,
 )
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN, SwitchService
+from homeassistant.components.time import (
+    DOMAIN as TIME_DOMAIN,
+    TimeService,
+    TimeServiceArgument,
+)
 from homeassistant.components.unifi.const import CONF_SITE_ID, DOMAIN
 from homeassistant.components.unifi.coordinator import POLL_INTERVAL
 from homeassistant.const import CONF_HOST, CONTENT_TYPE_JSON, CommonServiceArgument
@@ -29,6 +39,13 @@ from homeassistant.exceptions import HomeAssistantError
 from .conftest import ConfigEntryFactoryType
 from .test_sensor import FIREWALL_POLICY
 
+WEEKLY = {
+    "mode": "EVERY_WEEK",
+    "repeat_on_days": ["wed", "mon"],
+    "time_all_day": False,
+    "time_range_start": "15:00",
+    "time_range_end": "17:00",
+}
 CUSTOM = {
     "mode": "CUSTOM",
     "date_start": "2026-01-05",
@@ -39,6 +56,9 @@ CUSTOM = {
     "time_range_end": "06:00",
 }
 SELECT = "select.unifi_network_block_streaming_schedule"
+START_TIME = "time.unifi_network_block_streaming_schedule_start"
+END_TIME = "time.unifi_network_block_streaming_schedule_end"
+START_DATE = "date.unifi_network_block_streaming_schedule_start_date"
 SWITCH = "switch.unifi_network_block_streaming"
 
 
@@ -146,18 +166,44 @@ async def test_schedule_set_step_by_step(
         {SelectServiceArgument.OPTION: "one_time"},
     )
     assert hass.states.get(SELECT).state == "one_time"
+    # One time is dated today by the controller's clock, already the 16th.
+    assert hass.states.get(START_DATE).state == "2026-01-16"
+
+    await _call(
+        hass,
+        DATE_DOMAIN,
+        DateService.SET_VALUE,
+        START_DATE,
+        {DateServiceArgument.DATE: "2026-01-17"},
+    )
+    await _call(
+        hass,
+        TIME_DOMAIN,
+        TimeService.SET_VALUE,
+        START_TIME,
+        {TimeServiceArgument.TIME: "22:15:30"},
+    )
+    await _call(
+        hass,
+        TIME_DOMAIN,
+        TimeService.SET_VALUE,
+        END_TIME,
+        {TimeServiceArgument.TIME: "07:00:00"},
+    )
     await _call(hass, SWITCH_DOMAIN, SwitchService.TURN_ON, SWITCH)
 
-    # One time is dated today by the controller's clock, already the 16th.
-    assert len(controller.puts) == 2
+    assert len(controller.puts) == 5
     assert controller.policy["enabled"] is True
     assert controller.policy["schedule"] == {
         "mode": "ONE_TIME_ONLY",
-        "date": "2026-01-16",
-        "time_range_start": "21:00",
-        "time_range_end": "08:00",
+        "date": "2026-01-17",
+        "time_range_start": "22:15",
+        "time_range_end": "07:00",
     }
     assert hass.states.get(SELECT).state == "one_time"
+    assert hass.states.get(START_DATE).state == "2026-01-17"
+    assert hass.states.get(START_TIME).state == "22:15:00"
+    assert hass.states.get(END_TIME).state == "07:00:00"
     assert hass.states.get(SWITCH).state == "on"
 
 
@@ -188,6 +234,9 @@ async def test_schedule_entities_follow_polling(
     await hass.async_block_till_done()
 
     assert hass.states.get(SELECT).state == "one_time"
+    assert hass.states.get(START_DATE).state == "2026-02-01"
+    assert hass.states.get(START_TIME).state == "19:00:00"
+    assert hass.states.get(END_TIME).state == "06:30:00"
 
 
 @pytest.mark.parametrize("json_response", [True, False])
@@ -249,6 +298,18 @@ REJECTION = {
             SELECT,
             {SelectServiceArgument.OPTION: "always"},
         ),
+        (
+            TIME_DOMAIN,
+            TimeService.SET_VALUE,
+            START_TIME,
+            {TimeServiceArgument.TIME: "20:30:00"},
+        ),
+        (
+            DATE_DOMAIN,
+            DateService.SET_VALUE,
+            "date.unifi_network_block_streaming_schedule_end_date",
+            {DateServiceArgument.DATE: "2026-02-28"},
+        ),
         (SWITCH_DOMAIN, SwitchService.TURN_OFF, SWITCH, {}),
     ],
 )
@@ -305,3 +366,133 @@ async def test_rejected_switch_write_leaves_the_policy_unchanged(
     api = config_entry_setup.runtime_data.api
     assert api.firewall_policies[FIREWALL_POLICY["_id"]].enabled is True
     assert hass.states.get(SWITCH).state == "on"
+
+
+DAY_SWITCH = "switch.unifi_network_block_streaming_schedule_{}"
+ALL_DAY_SWITCH = "switch.unifi_network_block_streaming_schedule_all_day"
+
+
+@pytest.mark.parametrize(
+    "firewall_policy_payload",
+    [
+        [
+            {
+                **FIREWALL_POLICY,
+                "schedule": {
+                    "mode": "EVERY_WEEK",
+                    "repeat_on_days": [],
+                    "time_all_day": False,
+                    "time_range_start": "21:30",
+                    "time_range_end": "08:30",
+                },
+            }
+        ]
+    ],
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_schedule_days_step_by_step(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+    firewall_policy_payload: list[dict[str, Any]],
+) -> None:
+    """Days and all day can be set on a schedule that starts with no days."""
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock, mock_requests, config_entry, firewall_policy_payload[0]
+    )
+    for day in ("monday", "tuesday", "sunday"):
+        assert hass.states.get(DAY_SWITCH.format(day)).state == "off"
+
+    await _call(
+        hass, SWITCH_DOMAIN, SwitchService.TURN_ON, DAY_SWITCH.format("tuesday")
+    )
+    assert controller.policy["schedule"]["repeat_on_days"] == ["tue"]
+    assert hass.states.get(DAY_SWITCH.format("tuesday")).state == "on"
+    assert hass.states.get(DAY_SWITCH.format("monday")).state == "off"
+
+    await _call(hass, SWITCH_DOMAIN, SwitchService.TURN_ON, ALL_DAY_SWITCH)
+    assert controller.policy["schedule"] == {
+        "mode": "EVERY_WEEK",
+        "repeat_on_days": ["tue"],
+        "time_all_day": True,
+    }
+    assert hass.states.get(ALL_DAY_SWITCH).state == "on"
+    assert hass.states.get(START_TIME).state == "unknown"
+
+    await _call(hass, SWITCH_DOMAIN, SwitchService.TURN_OFF, ALL_DAY_SWITCH)
+    assert controller.policy["schedule"] == {
+        "mode": "EVERY_WEEK",
+        "repeat_on_days": ["tue"],
+        "time_all_day": False,
+        "time_range_start": "09:00",
+        "time_range_end": "12:00",
+    }
+    assert hass.states.get(ALL_DAY_SWITCH).state == "off"
+    assert hass.states.get(START_TIME).state == "09:00:00"
+    assert len(controller.puts) == 3
+
+
+@pytest.mark.parametrize(
+    "firewall_policy_payload", [[{**FIREWALL_POLICY, "schedule": CUSTOM}]]
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_custom_schedule_day_keeps_dates(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+    firewall_policy_payload: list[dict[str, Any]],
+) -> None:
+    """Changing a day in a Custom schedule keeps its date range and times."""
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock, mock_requests, config_entry, firewall_policy_payload[0]
+    )
+
+    await _call(
+        hass, SWITCH_DOMAIN, SwitchService.TURN_ON, DAY_SWITCH.format("wednesday")
+    )
+
+    assert controller.policy["schedule"] == {
+        **CUSTOM,
+        "repeat_on_days": ["mon", "wed", "fri"],
+    }
+    assert hass.states.get(DAY_SWITCH.format("wednesday")).state == "on"
+
+
+@pytest.mark.parametrize(
+    "firewall_policy_payload", [[{**FIREWALL_POLICY, "schedule": WEEKLY}]]
+)
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_simultaneous_day_and_time_writes_are_not_lost(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_factory: ConfigEntryFactoryType,
+    mock_requests: Callable[[], None],
+    firewall_policy_payload: list[dict[str, Any]],
+) -> None:
+    """A day switch and a time changed at the same moment both take effect."""
+    config_entry = await config_entry_factory()
+    controller = FakeController(
+        aioclient_mock,
+        mock_requests,
+        config_entry,
+        firewall_policy_payload[0],
+        put_delay=0.05,
+    )
+
+    await asyncio.gather(
+        _call(hass, SWITCH_DOMAIN, SwitchService.TURN_ON, DAY_SWITCH.format("friday")),
+        _call(
+            hass,
+            TIME_DOMAIN,
+            TimeService.SET_VALUE,
+            START_TIME,
+            {TimeServiceArgument.TIME: "16:00:00"},
+        ),
+    )
+
+    assert controller.policy["schedule"]["repeat_on_days"] == ["mon", "wed", "fri"]
+    assert controller.policy["schedule"]["time_range_start"] == "16:00"
