@@ -11,18 +11,13 @@ import aiounifi
 from aiounifi.interfaces.api_handlers import APIHandler, ItemEvent
 from aiounifi.interfaces.firewall_policies import FirewallPolicies
 from aiounifi.models.api import ApiItem
-from aiounifi.models.firewall_policy import (
-    FirewallPolicy,
-    FirewallPolicyScheduleMode,
-    build_schedule,
-)
+from aiounifi.models.firewall_policy import FirewallPolicy, FirewallPolicyScheduleMode
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.util import dt as dt_util
 
 from . import UnifiConfigEntry
 from .const import DOMAIN
@@ -30,6 +25,7 @@ from .entity import (
     UnifiEntity,
     UnifiEntityDescription,
     async_firewall_policy_supported_fn,
+    async_save_firewall_policy_schedule,
     async_unifi_network_device_info_fn,
 )
 
@@ -60,19 +56,8 @@ async def async_firewall_policy_schedule_mode_control_fn(
     hub: UnifiHub, obj_id: str, option: str
 ) -> None:
     """Change a firewall policy's schedule mode."""
-    mode = SCHEDULE_OPTION_MODES[option]
-    if mode.has_days:
-        # These modes need days of the week, which can't be chosen here yet.
-        raise ServiceValidationError(
-            translation_domain=DOMAIN,
-            translation_key="schedule_mode_not_supported",
-        )
-    # "Today" is the controller's date: its clock is the one the schedule runs on.
-    await hub.async_save_firewall_policy(
-        obj_id,
-        schedule_fn=lambda current: build_schedule(
-            current, dt_util.now(hub.time_zone).date(), mode=mode
-        ),
+    await async_save_firewall_policy_schedule(
+        hub, obj_id, mode=SCHEDULE_OPTION_MODES[option]
     )
 
 
