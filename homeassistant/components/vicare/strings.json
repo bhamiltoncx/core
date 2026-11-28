@@ -103,12 +103,6 @@
       "error": {
         "name": "Error",
         "state_attributes": {
-          "event_type": {
-            "state": {
-              "raised": "Raised",
-              "cleared": "Cleared"
-            }
-          },
           "error_code": {
             "name": "Error code"
           },
@@ -117,6 +111,12 @@
           },
           "error_time": {
             "name": "Error time"
+          },
+          "event_type": {
+            "state": {
+              "cleared": "Cleared",
+              "raised": "Raised"
+            }
           }
         }
       }

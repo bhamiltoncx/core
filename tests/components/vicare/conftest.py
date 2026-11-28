@@ -226,16 +226,12 @@ async def mock_vicare_gas_boiler(
         yield mock_config_entry
 
 
-@pytest.fixture
-async def mock_vicare_error_events(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry
-) -> AsyncGenerator[MockViCareService]:
-    """Set up a heat pump without errors.raw, whose errors come from the history.
+def error_events_pyvicare() -> MockPyViCare:
+    """Return a heat pump without errors.raw, whose errors come from the history.
 
-    Yields the gateway service, whose event history the test can add to. The
-    history holds three F.380 faults, the last one cleared.
+    The history holds three F.380 faults, the last one cleared.
     """
-    vicare = MockPyViCare(
+    return MockPyViCare(
         [
             Fixture(
                 {"type:heatpump"},
@@ -244,15 +240,33 @@ async def mock_vicare_error_events(
             )
         ]
     )
+
+
+async def async_setup_error_events(
+    hass: HomeAssistant, config_entry: MockConfigEntry, vicare: MockPyViCare
+) -> MockViCareService:
+    """Set up the heat pump of error_events_pyvicare() and return its service."""
     with (
         patch(
             "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
         ),
         patch(f"{MODULE}.PyViCare", return_value=vicare),
     ):
-        await setup_integration(hass, mock_config_entry)
+        await setup_integration(hass, config_entry)
+    return vicare.services["gateway0"]
 
-        yield vicare.services["gateway0"]
+
+@pytest.fixture
+async def mock_vicare_error_events(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> MockViCareService:
+    """Set up a heat pump whose errors come from the history.
+
+    Returns the gateway service, whose event history the test can add to.
+    """
+    return await async_setup_error_events(
+        hass, mock_config_entry, error_events_pyvicare()
+    )
 
 
 @pytest.fixture

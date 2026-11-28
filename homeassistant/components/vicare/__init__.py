@@ -43,19 +43,24 @@ from homeassistant.helpers import (
     issue_registry as ir,
 )
 from homeassistant.helpers.config_entry_oauth2_flow import MY_AUTH_CALLBACK_PATH
-from homeassistant.helpers.storage import STORAGE_DIR
+from homeassistant.helpers.storage import STORAGE_DIR, Store
 from homeassistant.helpers.typing import ConfigType
 
 from .api import ConfigEntryAuth
 from .const import (
-    DEFAULT_CACHE_DURATION,
     DOMAIN,
     PLATFORMS,
     UNSUPPORTED_DEVICES,
     VICARE_TOKEN_FILENAME,
     VIESSMANN_DEVELOPER_PORTAL,
 )
-from .coordinator import ViCareCoordinator
+from .coordinator import (
+    ERROR_HISTORY_STORAGE_VERSION,
+    ViCareCoordinator,
+    ViCareErrorHistoryStore,
+    error_history_store_key,
+    feature_interval,
+)
 from .services import async_setup_services
 from .types import ViCareConfigEntry, ViCareData, ViCareDevice
 from .utils import get_device_identifier, get_device_name, get_device_serial, get_rooms
@@ -201,6 +206,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ViCareConfigEntry) -> No
         devices_by_gateway[device.config.getConfig().serial].append(device)
 
     gateway_count = len(devices_by_gateway)
+    error_history_store = ViCareErrorHistoryStore(hass, entry.entry_id)
+    await error_history_store.async_load()
     coordinators: list[ViCareCoordinator] = []
     for gateway_devices in devices_by_gateway.values():
         representative = gateway_devices[0]
@@ -210,6 +217,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ViCareConfigEntry) -> No
             representative.api,
             representative.config.getConfig(),
             gateway_count,
+            error_history_store,
         )
         for device in gateway_devices:
             device.coordinator = coordinator
@@ -294,14 +302,11 @@ def _obtain_token_and_remove_token_file(
     return token
 
 
-def _setup_vicare_api(
-    auth: ConfigEntryAuth,
-    cache_duration: int = DEFAULT_CACHE_DURATION,
-) -> ViCareData:
+def _setup_vicare_api(auth: ConfigEntryAuth) -> ViCareData:
     """Set up PyVicare API."""
     client = PyViCare()
     client.loadViaGateway(True)
-    client.setCacheDuration(cache_duration)
+    client.setCacheDuration(feature_interval(1))
     client.initWithExternalOAuth(auth)
 
     device_config_list = get_supported_devices(client.devices)
@@ -318,7 +323,7 @@ def _setup_vicare_api(
         }
     )
     if gateway_count > 1:
-        cache_duration = DEFAULT_CACHE_DURATION * gateway_count
+        cache_duration = feature_interval(gateway_count)
         _LOGGER.debug(
             "Found %s gateways, adjusting cache duration to %s",
             gateway_count,
@@ -386,6 +391,13 @@ def _gateway_delivers_data(config: PyViCareDeviceConfig) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ViCareConfigEntry) -> None:
     """Unload ViCare config entry."""
     await hass.config_entries.async_unload_platforms_or_raise(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ViCareConfigEntry) -> None:
+    """Remove the saved error history of the config entry."""
+    await Store(
+        hass, ERROR_HISTORY_STORAGE_VERSION, error_history_store_key(entry.entry_id)
+    ).async_remove()
 
 
 async def async_migrate_devices_and_entities(

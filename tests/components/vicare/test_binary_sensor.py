@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import MockConfigEntry, snapshot_platform
+from PyViCare.PyViCareUtils import PyViCareInternalServerError
 from syrupy.assertion import SnapshotAssertion
 
 from homeassistant.components.vicare.coordinator import ERROR_EVENTS_EVERY
@@ -14,7 +15,13 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_component import async_update_entity
 
 from . import MODULE, async_poll, setup_integration
-from .conftest import Fixture, MockPyViCare, MockViCareService
+from .conftest import (
+    Fixture,
+    MockPyViCare,
+    MockViCareService,
+    async_setup_error_events,
+    error_events_pyvicare,
+)
 
 
 @pytest.mark.parametrize(
@@ -289,4 +296,23 @@ async def test_problem_keeps_errors_raw(
     ]
     assert len(problems) == 1
     # errors.raw of the fixture is empty, the history is not consulted.
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_OFF
+
+
+async def test_problem_unknown_until_the_history_is_read(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test the problem stays unknown while the history could not be read."""
+    vicare = error_events_pyvicare()
+    service = vicare.services["gateway0"]
+    service.fetch_events.side_effect = PyViCareInternalServerError(
+        {"statusCode": 500, "message": "boom", "viErrorId": "1"}
+    )
+    await async_setup_error_events(hass, mock_config_entry, vicare)
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_UNKNOWN
+
+    service.fetch_events.side_effect = service._fetch_events
+    await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY)
     assert hass.states.get("binary_sensor.model0_problem").state == STATE_OFF

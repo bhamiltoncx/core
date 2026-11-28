@@ -1,5 +1,5 @@
 # serializer version: 1
-# name: test_all_entities[event.model0_error-entry]
+# name: test_entity[entry]
   EntityRegistryEntrySnapshot({
     'aliases': list([
       None,
@@ -41,7 +41,7 @@
     'unit_of_measurement': None,
   })
 # ---
-# name: test_all_entities[event.model0_error-state]
+# name: test_entity[state]
   StateSnapshot({
     'attributes': ReadOnlyDict({
       <EventEntityStateAttribute.EVENT_TYPE: 'event_type'>: None,

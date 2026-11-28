@@ -1,6 +1,5 @@
 """Device error events raised by the ViCare integration."""
 
-from datetime import datetime
 from typing import override
 
 from PyViCare.PyViCareEvent import ViCareEvent
@@ -8,9 +7,8 @@ from PyViCare.PyViCareEvent import ViCareEvent
 from homeassistant.components.event import EventEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.util import dt as dt_util
 
-from .coordinator import ViCareCoordinator, event_time
+from .coordinator import ViCareCoordinator
 from .entity import ViCareCoordinatorEntity
 from .types import ViCareConfigEntry, ViCareDevice
 from .utils import has_error_history
@@ -45,10 +43,9 @@ async def async_setup_entry(
 class ViCareErrorEvent(ViCareCoordinatorEntity, EventEntity):
     """Fires when a device error is raised or cleared.
 
-    An error that comes and goes between two history fetches fires both. After
-    a restart the errors that came after the last fired one fire with the next
-    refresh, so a fault raised or cleared while Home Assistant was stopped is
-    not lost.
+    An error that comes and goes between two history fetches fires both. The
+    coordinator saves the history, so the errors raised or cleared while Home
+    Assistant was stopped fire after it starts again.
     """
 
     _attr_translation_key = "error"
@@ -59,58 +56,38 @@ class ViCareErrorEvent(ViCareCoordinatorEntity, EventEntity):
         super().__init__(coordinator, "error", device)
         self._vicare_device_id = device.config.getConfig().device_id
         self._pending: list[ViCareEvent] = []
-        # When the last fired error happened, until the first read catches up.
-        self._catch_up_after: datetime | None = None
 
+    @property
     @override
-    async def async_added_to_hass(self) -> None:
-        """Note when the last fired error happened, to catch up from there."""
-        if (
-            (last_event := await self.async_get_last_event_data())
-            and last_event.last_event_attributes
-            and isinstance(
-                error_time := last_event.last_event_attributes.get(ATTR_ERROR_TIME),
-                str,
-            )
-        ):
-            self._catch_up_after = dt_util.parse_datetime(error_time)
-        # Primes the first read, which picks up what is to catch up on.
-        await super().async_added_to_hass()
+    def available(self) -> bool:
+        """Return whether the event history can still be read."""
+        return super().available and self.coordinator.error_events_supported
 
     @override
     def _read_value(self) -> None:
-        """Pick up the error events of this device that are still to fire."""
-        if (catch_up_after := self._catch_up_after) is not None:
-            self._catch_up_after = None
-            self._pending.extend(
-                event
-                for event in self.coordinator.error_history.get(
-                    self._vicare_device_id, ()
-                )
-                if event_time(event) > catch_up_after
-            )
-        else:
-            self._pending.extend(
-                self.coordinator.new_error_events.get(self._vicare_device_id, ())
-            )
+        """Take the new error events of this device."""
+        self._pending.extend(
+            self.coordinator.take_new_error_events(self._vicare_device_id)
+        )
 
     @callback
     @override
     def _handle_coordinator_update(self) -> None:
-        """Fire the events picked up so far, oldest first."""
-        # A failed refresh notifies too without reading, so take them once.
+        """Fire the events taken so far, oldest first, once available."""
+        # Write the availability first: triggers ignore an event that comes
+        # straight from unavailable.
+        super()._handle_coordinator_update()
+        if not self.available:
+            return
         pending, self._pending = self._pending, []
         for event in pending:
+            error_time = event.event_timestamp or event.created_at
             self._trigger_event(
                 EVENT_RAISED if event.active else EVENT_CLEARED,
                 {
                     "error_code": event.error_code,
                     "error_description": event.error_description,
-                    ATTR_ERROR_TIME: event.event_timestamp.isoformat()
-                    if event.event_timestamp
-                    else None,
+                    ATTR_ERROR_TIME: error_time.isoformat() if error_time else None,
                 },
             )
             self.async_write_ha_state()
-        if not pending:
-            super()._handle_coordinator_update()

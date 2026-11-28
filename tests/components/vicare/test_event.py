@@ -1,31 +1,34 @@
 """Test the ViCare error event entity."""
 
+from datetime import timedelta
 from typing import Any
-from unittest.mock import patch
 
 from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import (
     MockConfigEntry,
-    mock_restore_cache_with_extra_data,
+    async_fire_time_changed,
+    load_json_object_fixture,
 )
+from PyViCare.PyViCareErrorHistory import ViCareErrorHistory
+from PyViCare.PyViCareEvent import ViCareEvent
+from PyViCare.PyViCareUtils import PyViCareInternalServerError, PyViCareNotPaidForError
 from syrupy.assertion import SnapshotAssertion
 
 from homeassistant.components.event import ATTR_EVENT_TYPE
-from homeassistant.components.vicare.coordinator import ERROR_EVENTS_EVERY
-from homeassistant.const import STATE_UNKNOWN
-from homeassistant.core import (
-    Event,
-    EventStateChangedData,
-    HomeAssistant,
-    State,
-    callback,
+from homeassistant.components.vicare.coordinator import (
+    ERROR_EVENTS_EVERY,
+    ERROR_HISTORY_SAVE_DELAY,
+    ERROR_HISTORY_STORAGE_VERSION,
+    error_history_store_key,
 )
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
-from . import MODULE, async_poll, setup_integration
-from .conftest import Fixture, MockPyViCare, MockViCareService
+from . import async_poll
+from .conftest import MockViCareService, async_setup_error_events, error_events_pyvicare
 
 ENTITY_ID = "event.model0_error"
 DEVICE_ID = "deviceId0"
@@ -124,36 +127,31 @@ async def test_other_devices_events_are_ignored(
     assert state.state == STATE_UNKNOWN
 
 
-@pytest.mark.usefixtures("mock_vicare_error_events")
-async def test_all_entities(
+async def test_entity(
     hass: HomeAssistant,
+    mock_vicare_error_events: MockViCareService,
     snapshot: SnapshotAssertion,
-    mock_config_entry: MockConfigEntry,
     entity_registry: er.EntityRegistry,
 ) -> None:
-    """Test the event entities."""
-    entries = er.async_entries_for_config_entry(
-        entity_registry, mock_config_entry.entry_id
-    )
-    for entry in entries:
-        if entry.domain == "event":
-            assert entry == snapshot(name=f"{entry.entity_id}-entry")
-            assert hass.states.get(entry.entity_id) == snapshot(
-                name=f"{entry.entity_id}-state"
-            )
+    """Test the event entity of a device that reports messages."""
+    assert entity_registry.async_get(ENTITY_ID) == snapshot(name="entry")
+    assert hass.states.get(ENTITY_ID) == snapshot(name="state")
 
 
 def _track_fired(hass: HomeAssistant) -> list[tuple[str, str, str]]:
-    """Record the event type, code and time of each event the entity fires."""
+    """Record the event type, code and time of each event a trigger sees.
+
+    Like the event received trigger, skip a state that comes straight from
+    unavailable, and the first state.
+    """
     fired: list[tuple[str, str, str]] = []
 
     @callback
     def record(event: Event[EventStateChangedData]) -> None:
-        new_state = event.data["new_state"]
-        assert new_state is not None
-        # The first state is the restored one, not a fired event.
-        if event.data["old_state"] is None:
+        old_state, new_state = event.data["old_state"], event.data["new_state"]
+        if old_state is None or old_state.state == STATE_UNAVAILABLE:
             return
+        assert new_state is not None
         fired.append(
             (
                 new_state.attributes[ATTR_EVENT_TYPE],
@@ -166,86 +164,108 @@ def _track_fired(hass: HomeAssistant) -> list[tuple[str, str, str]]:
     return fired
 
 
-async def _setup_with_restored_event(
-    hass: HomeAssistant,
-    config_entry: MockConfigEntry,
-    last_event_attributes: dict[str, Any],
-) -> None:
-    """Set up the heat pump after a restart, its last fired event restored."""
-    mock_restore_cache_with_extra_data(
-        hass,
-        (
-            (
-                State(ENTITY_ID, "2026-11-21T22:07:30.000+00:00"),
-                {
-                    "last_event_type": "cleared",
-                    "last_event_attributes": last_event_attributes,
-                },
-            ),
-        ),
+def _save_history_of_previous_run(hass_storage: dict[str, Any]) -> None:
+    """Save the history as a run that stopped before the November 26 fault."""
+    page = load_json_object_fixture("vicare/Vitodens100_error_events.json")["data"]
+    history = ViCareErrorHistory()
+    # Newest first: the raise and clear of November 26 lead the page.
+    history.update(
+        ViCareEvent({**raw, "body": {**raw["body"], "deviceId": DEVICE_ID}})
+        for raw in page[2:]
     )
-    vicare = MockPyViCare(
-        [
-            Fixture(
-                {"type:heatpump"},
-                "vicare/Vitocal250A.json",
-                error_events="vicare/Vitodens100_error_events.json",
-            )
-        ]
-    )
-    with (
-        patch(
-            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
-        ),
-        patch(f"{MODULE}.PyViCare", return_value=vicare),
-    ):
-        await setup_integration(hass, config_entry)
+    hass_storage[error_history_store_key("1234")] = {
+        "version": ERROR_HISTORY_STORAGE_VERSION,
+        "key": error_history_store_key("1234"),
+        "data": {"gateway0": history.as_dict()},
+    }
+
+
+NOVEMBER_26 = [
+    ("raised", "F.380", "2026-11-26T01:17:32+00:00"),
+    ("cleared", "F.380", "2026-11-26T15:29:59+00:00"),
+]
 
 
 async def test_fires_events_missed_while_stopped(
     hass: HomeAssistant,
+    hass_storage: dict[str, Any],
     mock_config_entry: MockConfigEntry,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """Test the errors that came after the last fired one fire after startup.
+    """Test the errors of the history that the saved one lacks fire after startup.
 
-    The entity last fired the clear of the November 21 evening fault. The
-    November 26 fault came and went while Home Assistant was stopped.
+    The November 26 fault came and went while Home Assistant was stopped. The
+    entity never fired before, the saved history is what tells them apart.
     """
+    _save_history_of_previous_run(hass_storage)
     fired = _track_fired(hass)
-    await _setup_with_restored_event(
-        hass,
-        mock_config_entry,
-        {
-            "error_code": "F.380",
-            "error_description": "Flame loss immediately after flame formation",
-            "error_time": "2026-11-21T22:06:55+00:00",
-        },
-    )
+    await async_setup_error_events(hass, mock_config_entry, error_events_pyvicare())
+
     # They fire with the first refresh after the entity was added.
-    assert fired == []
     await async_poll(hass, freezer, mock_config_entry)
-    assert fired == [
-        ("raised", "F.380", "2026-11-26T01:17:32+00:00"),
-        ("cleared", "F.380", "2026-11-26T15:29:59+00:00"),
-    ]
+    assert fired == NOVEMBER_26
 
-    # The next history fetch fires them no second time.
     await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY)
-    assert len(fired) == 2
+    assert fired == NOVEMBER_26
 
 
-async def test_restored_event_without_time_fires_nothing(
+async def test_holds_events_while_unavailable(
     hass: HomeAssistant,
+    hass_storage: dict[str, Any],
     mock_config_entry: MockConfigEntry,
     freezer: FrozenDateTimeFactory,
 ) -> None:
-    """Test a restored event without its error time replays no history."""
+    """Test events wait for the entity to be available, so triggers see them."""
+    _save_history_of_previous_run(hass_storage)
     fired = _track_fired(hass)
-    await _setup_with_restored_event(
-        hass,
-        mock_config_entry,
-        {"error_code": "F.380", "error_description": "Flame loss"},
+    service = await async_setup_error_events(
+        hass, mock_config_entry, error_events_pyvicare()
+    )
+
+    service.fetch_all_features.side_effect = PyViCareInternalServerError(
+        {"statusCode": 500, "message": "boom", "viErrorId": "1"}
     )
     await async_poll(hass, freezer, mock_config_entry)
+    assert hass.states.get(ENTITY_ID).state == STATE_UNAVAILABLE
     assert fired == []
+
+    service.fetch_all_features.side_effect = service._fetch_all_features
+    await async_poll(hass, freezer, mock_config_entry)
+    assert fired == NOVEMBER_26
+
+
+async def test_saves_the_history(
+    hass: HomeAssistant,
+    hass_storage: dict[str, Any],
+    mock_vicare_error_events: MockViCareService,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test the history is saved after a fetch, for the next start."""
+    mock_vicare_error_events.add_error_event(
+        DEVICE_ID, "F.380", True, "2026-11-28T10:00:00.000Z"
+    )
+    await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY)
+    freezer.tick(timedelta(seconds=ERROR_HISTORY_SAVE_DELAY))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    saved = hass_storage[error_history_store_key("1234")]["data"]["gateway0"]
+    history = ViCareErrorHistory.from_dict(saved)
+    assert [event.error_code for event in history.active_errors(DEVICE_ID)] == ["F.380"]
+
+
+async def test_unavailable_when_the_history_is_refused(
+    hass: HomeAssistant,
+    mock_vicare_error_events: MockViCareService,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test the error entities go unavailable when the history is refused later."""
+    mock_vicare_error_events.fetch_events.side_effect = PyViCareNotPaidForError(
+        {"extendedPayload": {"monetization": "basic"}}
+    )
+    await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY)
+
+    assert hass.states.get(ENTITY_ID).state == STATE_UNAVAILABLE
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_UNAVAILABLE

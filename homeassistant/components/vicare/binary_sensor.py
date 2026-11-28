@@ -285,9 +285,17 @@ class ViCareErrorHistoryBinarySensor(ViCareCoordinatorEntity, BinarySensorEntity
         super().__init__(coordinator, DEVICE_ERROR_KEY, device)
         self._vicare_device_id = device.config.getConfig().device_id
 
+    @property
+    @override
+    def available(self) -> bool:
+        """Return whether the event history can still be read."""
+        return super().available and self.coordinator.error_events_supported
+
     @override
     def _read_value(self) -> None:
-        """Read whether an error of this device stands."""
-        self._attr_is_on = bool(
-            self.coordinator.active_errors.get(self._vicare_device_id)
+        """Read whether an error of this device stands, once the history is read."""
+        self._attr_is_on = (
+            bool(self.coordinator.active_errors(self._vicare_device_id))
+            if self.coordinator.error_history_fetched
+            else None
         )
