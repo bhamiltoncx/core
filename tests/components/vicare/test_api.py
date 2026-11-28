@@ -1,46 +1,83 @@
 """Test the ViCare API session."""
 
-from pytest_homeassistant.common import MockConfigEntry
+from unittest.mock import patch
+
+from freezegun.api import FrozenDateTimeFactory
+from pytest_homeassistant.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+    async_load_json_object_fixture,
+)
 from PyViCare.PyViCareAbstractOAuthManager import API_BASE_URL
 import requests_mock
 
-from homeassistant.components.vicare.api import ConfigEntryAuth
+from homeassistant.components.vicare.const import DOMAIN
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_entry_oauth2_flow
 
-URL = "/equipment/installations"
+from . import setup_integration
+
+INSTALLATIONS_URL = f"{API_BASE_URL}/equipment/installations?includeGateways=true"
+FEATURES_URL = (
+    f"{API_BASE_URL}/features/installations/1234/gateways/gateway0"
+    "/features?includeDevicesFeatures=true"
+)
+INSTALLATIONS = {
+    "data": [
+        {
+            "id": 1234,
+            "gateways": [
+                {
+                    "serial": "gateway0",
+                    "devices": [
+                        {
+                            "id": "0",
+                            "modelId": "E3_Vitodens_300W",
+                            "status": "Online",
+                            "deviceType": "heating",
+                            "roles": ["type:boiler"],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+}
 
 
 async def test_requests_ask_for_the_configured_language(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     requests_mock: requests_mock.Mocker,
+    freezer: FrozenDateTimeFactory,
 ) -> None:
     """Test the API is asked for texts in the language of Home Assistant.
 
     The API localizes texts such as error descriptions by Accept-Language. A
-    change of the language applies to the next request, without a reload.
+    change of the language applies to the next refresh, without a reload.
     """
-    mock_config_entry.add_to_hass(hass)
-    implementation = (
-        await config_entry_oauth2_flow.async_get_config_entry_implementation(
-            hass, mock_config_entry
-        )
+    requests_mock.get(INSTALLATIONS_URL, json=INSTALLATIONS)
+    features = requests_mock.get(
+        FEATURES_URL,
+        json=await async_load_json_object_fixture(hass, "Vitodens300W.json", DOMAIN),
     )
-    auth = ConfigEntryAuth(
-        hass,
-        config_entry_oauth2_flow.OAuth2Session(hass, mock_config_entry, implementation),
-    )
-    requests_mock.get(f"{API_BASE_URL}{URL}", json={"data": []})
-
     hass.config.language = "de"
-    await hass.async_add_executor_job(auth.get, URL)
-    assert requests_mock.last_request.headers["Accept-Language"] == "de"
+    with patch(
+        "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+    ):
+        await setup_integration(hass, mock_config_entry)
+
+    assert features.called
+    assert {
+        request.headers["Accept-Language"] for request in requests_mock.request_history
+    } == {"de"}
+    assert features.last_request.headers["Authorization"] == "Bearer mock-access-token"
 
     hass.config.language = "pt-BR"
-    await hass.async_add_executor_job(auth.get, URL)
-    assert requests_mock.last_request.headers["Accept-Language"] == "pt-BR"
-    assert (
-        requests_mock.last_request.headers["Authorization"]
-        == "Bearer mock-access-token"
-    )
+    coordinator = mock_config_entry.runtime_data.devices[0].coordinator
+    calls = features.call_count
+    freezer.tick(coordinator.update_interval)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert features.call_count == calls + 1
+    assert features.last_request.headers["Accept-Language"] == "pt-BR"
