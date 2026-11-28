@@ -114,6 +114,9 @@
           },
           "error_description": {
             "name": "Error description"
+          },
+          "error_time": {
+            "name": "Error time"
           }
         }
       }

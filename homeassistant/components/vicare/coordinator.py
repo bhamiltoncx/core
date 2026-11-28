@@ -54,7 +54,7 @@ def _error_event_key(event: ViCareEvent) -> _ErrorEventKey:
     )
 
 
-def _event_time(event: ViCareEvent) -> datetime:
+def event_time(event: ViCareEvent) -> datetime:
     """Return when the event happened, for ordering."""
     return event.event_timestamp or event.created_at or datetime.min.replace(tzinfo=UTC)
 
@@ -104,6 +104,8 @@ class ViCareCoordinator(DataUpdateCoordinator[None]):
         self.active_errors: dict[str, list[ViCareEvent]] = {}
         # Error events that arrived with this refresh, oldest first, by device.
         self.new_error_events: dict[str, list[ViCareEvent]] = {}
+        # Every error event of the last fetch, oldest first, by device.
+        self.error_history: dict[str, list[ViCareEvent]] = {}
         self._seen_error_events: set[_ErrorEventKey] | None = None
         self._refreshes_until_error_events = 0
 
@@ -236,9 +238,13 @@ class ViCareCoordinator(DataUpdateCoordinator[None]):
                 for event in events
                 if event.device_id and event.error_code
             ),
-            key=lambda error: _event_time(error[2]),
+            key=lambda error: event_time(error[2]),
         )
         newest = {(device_id, code): event for device_id, code, event in errors}
+        history: defaultdict[str, list[ViCareEvent]] = defaultdict(list)
+        for device_id, _, event in errors:
+            history[device_id].append(event)
+        self.error_history = dict(history)
         active: defaultdict[str, list[ViCareEvent]] = defaultdict(list)
         for (device_id, _), event in newest.items():
             if event.active:
