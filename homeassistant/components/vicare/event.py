@@ -1,4 +1,4 @@
-"""Device error events of the ViCare integration."""
+"""Device error events raised by the ViCare integration."""
 
 from typing import override
 
