@@ -4,11 +4,13 @@ from collections.abc import AsyncGenerator, Generator
 from dataclasses import dataclass
 import re
 import time
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from pytest_homeassistant.common import MockConfigEntry, load_json_object_fixture
 from PyViCare.PyViCareDeviceConfig import PyViCareDeviceConfig
+from PyViCare.PyViCareEvent import ViCareEventPage
 from PyViCare.PyViCareService import ViCareDeviceAccessor, readFeature
 
 from homeassistant.components.application_credentials import (
@@ -31,6 +33,8 @@ class Fixture:
     # Opt-in shared gateway serial; defaults to a per-fixture gateway when unset.
     gateway_id: str | None = None
     online: bool = True
+    # Event history of the device, a saved events-history response.
+    error_events: str | None = None
 
 
 class MockPyViCare:
@@ -96,7 +100,10 @@ class MockViCareService:
     def __init__(self, roles: set[str]) -> None:
         """Initialize an empty gateway service."""
         self._features: dict[str, list] = {}
+        # Newest first, like the events-history API returns them.
+        self.events: list[dict[str, Any]] = []
         self.fetch_all_features = Mock(side_effect=self._fetch_all_features)
+        self.fetch_events = Mock(side_effect=self._fetch_events)
         self.setProperty = Mock()
         self.clear_cache = Mock()
         self.roles = roles
@@ -112,6 +119,48 @@ class MockViCareService:
                     r"/devices/[^/]+/", f"/devices/{device_id}/", feature["uri"]
                 )
         self._features[device_id] = features
+        if fixture.error_events:
+            for event in load_json_object_fixture(fixture.error_events)["data"]:
+                event["body"]["deviceId"] = device_id
+                self.events.append(event)
+
+    def add_error_event(
+        self, device_id: str, error_code: str, active: bool, timestamp: str
+    ) -> None:
+        """Record a device error event, as the API would on a raise or clear."""
+        self.events.insert(
+            0,
+            {
+                "eventType": "device-error",
+                "body": {
+                    "errorCode": error_code,
+                    "deviceId": device_id,
+                    "active": active,
+                    "errorEventType": "Error",
+                    "errorDescription": f"Description of {error_code}",
+                },
+                "createdAt": timestamp,
+                "eventTimestamp": timestamp,
+            },
+        )
+
+    def _fetch_events(
+        self,
+        accessor: ViCareDeviceAccessor,
+        event_type: str | None = None,
+        *,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> ViCareEventPage:
+        """Return the gateway's events, filtered by type, newest first."""
+        events = [
+            event
+            for event in self.events
+            if event_type is None or event["eventType"] == event_type
+        ]
+        return ViCareEventPage.from_payload(
+            {"cursor": {"next": ""}, "data": events[:limit]}
+        )
 
     def _fetch_all_features(self, accessor: ViCareDeviceAccessor):
         """Return the features of every device on the gateway."""
@@ -175,6 +224,35 @@ async def mock_vicare_gas_boiler(
         await setup_integration(hass, mock_config_entry)
 
         yield mock_config_entry
+
+
+@pytest.fixture
+async def mock_vicare_error_events(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> AsyncGenerator[MockViCareService]:
+    """Set up a heat pump without errors.raw, whose errors come from the history.
+
+    Yields the gateway service, whose event history the test can add to. The
+    history holds three F.380 faults, the last one cleared.
+    """
+    vicare = MockPyViCare(
+        [
+            Fixture(
+                {"type:heatpump"},
+                "vicare/Vitocal250A.json",
+                error_events="vicare/Vitodens100_error_events.json",
+            )
+        ]
+    )
+    with (
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+        ),
+        patch(f"{MODULE}.PyViCare", return_value=vicare),
+    ):
+        await setup_integration(hass, mock_config_entry)
+
+        yield vicare.services["gateway0"]
 
 
 @pytest.fixture

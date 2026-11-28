@@ -21,9 +21,17 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .entity import ViCareEntity
+from .coordinator import ViCareCoordinator
+from .entity import ViCareCoordinatorEntity, ViCareEntity
 from .types import ViCareConfigEntry, ViCareDevice, ViCareRequiredKeysMixin
-from .utils import get_burners, get_circuits, get_compressors, get_rooms, is_supported
+from .utils import (
+    get_burners,
+    get_circuits,
+    get_compressors,
+    get_rooms,
+    has_error_history,
+    is_supported,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +44,8 @@ class ViCareBinarySensorEntityDescription(
 
     value_getter: Callable[[PyViCareDevice], bool]
 
+
+DEVICE_ERROR_KEY = "device_error"
 
 CIRCUIT_SENSORS: tuple[ViCareBinarySensorEntityDescription, ...] = (
     ViCareBinarySensorEntityDescription(
@@ -141,7 +151,7 @@ GLOBAL_SENSORS: tuple[ViCareBinarySensorEntityDescription, ...] = (
         value_getter=lambda api: api.getHolidayAtHomeActive(),
     ),
     ViCareBinarySensorEntityDescription(
-        key="device_error",
+        key=DEVICE_ERROR_KEY,
         device_class=BinarySensorDeviceClass.PROBLEM,
         value_getter=lambda api: len(api.getDeviceErrors()) > 0,
     ),
@@ -181,10 +191,10 @@ GLOBAL_SENSORS: tuple[ViCareBinarySensorEntityDescription, ...] = (
 
 def _build_entities(
     device_list: list[ViCareDevice],
-) -> list[ViCareBinarySensor]:
+) -> list[ViCareBinarySensor | ViCareErrorHistoryBinarySensor]:
     """Create ViCare binary sensor entities for a device."""
 
-    entities: list[ViCareBinarySensor] = []
+    entities: list[ViCareBinarySensor | ViCareErrorHistoryBinarySensor] = []
     for device in device_list:
         # add device entities
         entities.extend(
@@ -195,6 +205,15 @@ def _build_entities(
             for description in GLOBAL_SENSORS
             if is_supported(description.key, description.value_getter, device.api)
         )
+        # Without errors.raw the device errors come from the event history.
+        if (
+            device.coordinator is not None
+            and not is_supported(
+                DEVICE_ERROR_KEY, lambda api: api.getDeviceErrors(), device.api
+            )
+            and has_error_history(device)
+        ):
+            entities.append(ViCareErrorHistoryBinarySensor(device.coordinator, device))
         # add component entities
         for component_list, entity_description_list in (
             (get_circuits(device.api), CIRCUIT_SENSORS),
@@ -254,3 +273,21 @@ class ViCareBinarySensor(ViCareEntity, BinarySensorEntity):
         """Update state of sensor."""
         with self.vicare_api_handler(), suppress(PyViCareNotSupportedFeatureError):
             self._attr_is_on = self.entity_description.value_getter(self._api)
+
+
+class ViCareErrorHistoryBinarySensor(ViCareCoordinatorEntity, BinarySensorEntity):
+    """Whether a device error stands, read from the event history."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, coordinator: ViCareCoordinator, device: ViCareDevice) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, DEVICE_ERROR_KEY, device)
+        self._vicare_device_id = device.config.getConfig().device_id
+
+    @override
+    def _read_value(self) -> None:
+        """Read whether an error of this device stands."""
+        self._attr_is_on = bool(
+            self.coordinator.active_errors.get(self._vicare_device_id)
+        )

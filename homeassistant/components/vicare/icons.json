@@ -64,6 +64,11 @@
         "default": "mdi:shower-head"
       }
     },
+    "event": {
+      "error": {
+        "default": "mdi:alert-circle-outline"
+      }
+    },
     "fan": {
       "ventilation": {
         "state_attributes": {

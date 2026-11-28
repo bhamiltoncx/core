@@ -13,12 +13,14 @@ from PyViCare.PyViCareUtils import (
     PyViCareInvalidConfigurationError,
     PyViCareInvalidCredentialsError,
     PyViCareInvalidDataError,
+    PyViCareNotPaidForError,
     PyViCareNotSupportedFeatureError,
     PyViCareRateLimitError,
 )
 import requests
 
 from homeassistant.components.vicare.const import DEFAULT_CACHE_DURATION, DOMAIN
+from homeassistant.components.vicare.coordinator import ERROR_EVENTS_EVERY
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import (
     CONF_CLIENT_ID,
@@ -38,8 +40,13 @@ from homeassistant.helpers import (
     issue_registry as ir,
 )
 
-from . import MODULE, setup_integration
-from .conftest import Fixture, MockPyViCare
+from . import MODULE, async_poll, setup_integration
+from .conftest import Fixture, MockPyViCare, MockViCareService
+
+# The feature interval of one gateway, stretched to make room for the history.
+UPDATE_INTERVAL = timedelta(
+    seconds=DEFAULT_CACHE_DURATION * (ERROR_EVENTS_EVERY + 1) / ERROR_EVENTS_EVERY
+)
 
 # From a real rate limit response: 2026-09-09T00:00:04.144Z.
 QUOTA_RESET_MS = 1788912004144
@@ -1121,15 +1128,15 @@ async def test_coordinator_backs_off_on_gateway_offline(
     service.fetch_all_features.side_effect = PyViCareDeviceCommunicationError(
         {"extendedPayload": {"reason": "GATEWAY_OFFLINE"}}
     )
-    freezer.tick(timedelta(seconds=DEFAULT_CACHE_DURATION))
+    freezer.tick(UPDATE_INTERVAL)
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
 
     assert hass.states.get(SENSOR_ID).state == STATE_UNAVAILABLE
     calls = service.fetch_all_features.call_count
 
-    # Ordinary interval (60s) does not trigger fetch before 300s deadline
-    freezer.tick(timedelta(seconds=DEFAULT_CACHE_DURATION))
+    # The ordinary interval does not trigger fetch before 300s deadline
+    freezer.tick(UPDATE_INTERVAL)
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert service.fetch_all_features.call_count == calls
@@ -1167,9 +1174,9 @@ async def test_coordinator_backs_off_on_gateway_offline(
     assert service.fetch_all_features.call_count == calls + 1
     assert hass.states.get(SENSOR_ID).state != STATE_UNAVAILABLE
 
-    # Subsequent refresh happens at regular interval (60s)
+    # Subsequent refresh happens at the regular interval
     calls = service.fetch_all_features.call_count
-    freezer.tick(timedelta(seconds=DEFAULT_CACHE_DURATION))
+    freezer.tick(UPDATE_INTERVAL)
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert service.fetch_all_features.call_count == calls + 1
@@ -1179,13 +1186,13 @@ async def test_coordinator_backs_off_on_gateway_offline(
     service.fetch_all_features.side_effect = PyViCareDeviceCommunicationError(
         {"extendedPayload": {"reason": "GATEWAY_OFFLINE"}}
     )
-    freezer.tick(timedelta(seconds=DEFAULT_CACHE_DURATION))
+    freezer.tick(UPDATE_INTERVAL)
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert hass.states.get(SENSOR_ID).state == STATE_UNAVAILABLE
     calls = service.fetch_all_features.call_count
 
-    freezer.tick(timedelta(seconds=DEFAULT_CACHE_DURATION))
+    freezer.tick(UPDATE_INTERVAL)
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert service.fetch_all_features.call_count == calls
@@ -1194,3 +1201,95 @@ async def test_coordinator_backs_off_on_gateway_offline(
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert service.fetch_all_features.call_count == calls + 1
+
+
+async def test_error_events_every_tenth_refresh(
+    hass: HomeAssistant,
+    mock_vicare_error_events: MockViCareService,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test the history is fetched with the first and then every Nth refresh.
+
+    The feature interval stretches so both together stay within the call
+    budget of one feature fetch a minute.
+    """
+    coordinator = mock_config_entry.runtime_data.devices[0].coordinator
+    assert coordinator.update_interval == UPDATE_INTERVAL
+    assert mock_vicare_error_events.fetch_events.call_count == 1
+    assert mock_vicare_error_events.fetch_events.call_args.kwargs == {
+        "gateway_serials": "gateway0",
+        "limit": 100,
+    }
+
+    await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY - 1)
+    assert mock_vicare_error_events.fetch_events.call_count == 1
+
+    await async_poll(hass, freezer, mock_config_entry)
+    assert mock_vicare_error_events.fetch_events.call_count == 2
+
+
+async def test_error_events_failure_retries_next_refresh(
+    hass: HomeAssistant,
+    mock_vicare_error_events: MockViCareService,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test a failed history fetch leaves the features alone and is retried."""
+    mock_vicare_error_events.fetch_events.side_effect = PyViCareInternalServerError(
+        {"statusCode": 500, "message": "boom", "viErrorId": "1"}
+    )
+    await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY)
+    assert mock_vicare_error_events.fetch_events.call_count == 2
+    assert hass.states.get("binary_sensor.model0_problem").state == "off"
+    assert hass.states.get("sensor.model0_outside_temperature").state != (
+        STATE_UNAVAILABLE
+    )
+
+    await async_poll(hass, freezer, mock_config_entry)
+    assert mock_vicare_error_events.fetch_events.call_count == 3
+
+    mock_vicare_error_events.fetch_events.side_effect = (
+        mock_vicare_error_events._fetch_events
+    )
+    mock_vicare_error_events.add_error_event(
+        "deviceId0", "F.380", True, "2026-11-28T10:00:00.000Z"
+    )
+    await async_poll(hass, freezer, mock_config_entry)
+    assert mock_vicare_error_events.fetch_events.call_count == 4
+    assert hass.states.get("binary_sensor.model0_problem").state == "on"
+
+
+async def test_error_events_not_paid_for(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test a plan without the event history creates no error entities."""
+    vicare = MockPyViCare(
+        [
+            Fixture(
+                {"type:heatpump"},
+                "vicare/Vitocal250A.json",
+                error_events="vicare/Vitodens100_error_events.json",
+            )
+        ]
+    )
+    service = vicare.services["gateway0"]
+    service.fetch_events.side_effect = PyViCareNotPaidForError(
+        {"extendedPayload": {"monetization": "basic"}}
+    )
+    with (
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+        ),
+        patch(f"{MODULE}.PyViCare", return_value=vicare),
+    ):
+        await setup_integration(hass, mock_config_entry)
+
+        assert mock_config_entry.state is ConfigEntryState.LOADED
+        assert hass.states.get("event.model0_error") is None
+        assert hass.states.get("binary_sensor.model0_problem") is None
+
+        await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY * 2)
+        assert service.fetch_events.call_count == 1

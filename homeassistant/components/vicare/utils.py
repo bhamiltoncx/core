@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, timedelta
+from functools import partial
 import logging
 from typing import Any
 
@@ -26,6 +27,7 @@ from homeassistant.helpers.storage import STORAGE_DIR
 from homeassistant.util import dt as dt_util
 
 from .const import DEFAULT_CACHE_DURATION, VICARE_TOKEN_FILENAME
+from .types import ViCareDevice
 
 MAX_RATE_LIMIT_BACKOFF = 86400  # the quota window is a day
 
@@ -125,6 +127,33 @@ def is_supported(
         return False
     _LOGGER.debug("Found entity %s", name)
     return True
+
+
+# A device with any of these reports messages, so its errors reach the history.
+DEVICE_MESSAGE_FEATURES = (
+    "device.messages.errors.raw",
+    "device.messages.info.raw",
+    "device.messages.service.raw",
+    "device.messages.status.raw",
+    "device.messages.warnings.raw",
+)
+
+
+def has_error_history(device: ViCareDevice) -> bool:
+    """Return whether the device's errors can be read from the event history."""
+    coordinator = device.coordinator
+    if coordinator is None or not coordinator.error_events_supported:
+        return False
+    api = device.api
+    return any(
+        is_supported(feature, partial(_read_feature, feature=feature), api)
+        for feature in DEVICE_MESSAGE_FEATURES
+    )
+
+
+def _read_feature(api: PyViCareDevice, feature: str) -> Any:
+    """Read a raw feature of the device."""
+    return api.service.getProperty(api.accessor, feature)
 
 
 def get_burners(device: PyViCareDevice) -> list[PyViCareHeatingDeviceComponent]:

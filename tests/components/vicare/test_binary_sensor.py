@@ -2,17 +2,19 @@
 
 from unittest.mock import MagicMock, patch
 
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import MockConfigEntry, snapshot_platform
 from syrupy.assertion import SnapshotAssertion
 
+from homeassistant.components.vicare.coordinator import ERROR_EVENTS_EVERY
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNKNOWN, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_component import async_update_entity
 
-from . import MODULE, setup_integration
-from .conftest import Fixture, MockPyViCare
+from . import MODULE, async_poll, setup_integration
+from .conftest import Fixture, MockPyViCare, MockViCareService
 
 
 @pytest.mark.parametrize(
@@ -196,3 +198,95 @@ async def test_room_window_and_condensation_risk(
     ):
         await async_update_entity(hass, entity_id)
         assert hass.states.get(entity_id).state == state
+
+
+async def test_problem_from_error_events(
+    hass: HomeAssistant,
+    mock_vicare_error_events: MockViCareService,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """Test a device without errors.raw reports errors from the event history."""
+    # The newest F.380 of the history is cleared.
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_OFF
+
+    mock_vicare_error_events.add_error_event(
+        "deviceId0", "F.380", True, "2026-11-28T10:00:00.000Z"
+    )
+    await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY)
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_ON
+
+    mock_vicare_error_events.add_error_event(
+        "deviceId0", "F.380", False, "2026-11-28T10:05:00.000Z"
+    )
+    await async_poll(hass, freezer, mock_config_entry, ERROR_EVENTS_EVERY)
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_OFF
+
+
+async def test_problem_from_error_events_active_at_startup(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Test an error raised before startup and never cleared is reported."""
+    vicare = MockPyViCare(
+        [
+            Fixture(
+                {"type:heatpump"},
+                "vicare/Vitocal250A.json",
+                error_events="vicare/Vitodens100_error_events.json",
+            )
+        ]
+    )
+    service = vicare.services["gateway0"]
+    service.add_error_event("deviceId0", "F.357", True, "2026-11-27T08:00:00.000Z")
+    # A late arriving older clear of another code changes nothing.
+    service.add_error_event("deviceId0", "F.380", False, "2026-11-26T15:29:59.000Z")
+    with (
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+        ),
+        patch(f"{MODULE}.PyViCare", return_value=vicare),
+        patch(f"{MODULE}.PLATFORMS", [Platform.BINARY_SENSOR]),
+    ):
+        await setup_integration(hass, mock_config_entry)
+
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_ON
+
+
+async def test_problem_keeps_errors_raw(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """Test a device with errors.raw keeps reading it, with one problem entity."""
+    vicare = MockPyViCare(
+        [
+            Fixture(
+                {"type:ventilation"},
+                "vicare/ViAir300F.json",
+                error_events="vicare/Vitodens100_error_events.json",
+            )
+        ]
+    )
+    service = vicare.services["gateway0"]
+    service.add_error_event("deviceId0", "F.357", True, "2026-11-27T08:00:00.000Z")
+    with (
+        patch(
+            "homeassistant.helpers.config_entry_oauth2_flow.OAuth2Session.async_ensure_token_valid",
+        ),
+        patch(f"{MODULE}.PyViCare", return_value=vicare),
+        patch(f"{MODULE}.PLATFORMS", [Platform.BINARY_SENSOR]),
+    ):
+        await setup_integration(hass, mock_config_entry)
+        await async_update_entity(hass, "binary_sensor.model0_problem")
+
+    problems = [
+        entry
+        for entry in er.async_entries_for_config_entry(
+            entity_registry, mock_config_entry.entry_id
+        )
+        if entry.unique_id.endswith("-device_error")
+    ]
+    assert len(problems) == 1
+    # errors.raw of the fixture is empty, the history is not consulted.
+    assert hass.states.get("binary_sensor.model0_problem").state == STATE_OFF

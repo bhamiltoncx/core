@@ -99,6 +99,25 @@
         "name": "Heating"
       }
     },
+    "event": {
+      "error": {
+        "name": "Error",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "raised": "Raised",
+              "cleared": "Cleared"
+            }
+          },
+          "error_code": {
+            "name": "Error code"
+          },
+          "error_description": {
+            "name": "Error description"
+          }
+        }
+      }
+    },
     "fan": {
       "ventilation": {
         "name": "Ventilation",

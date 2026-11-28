@@ -1,0 +1,151 @@
+{
+  "cursor": {
+    "next": ""
+  },
+  "data": [
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.380",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": false,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Flame loss immediately after flame formation"
+      },
+      "createdAt": "2026-11-26T15:30:29.390Z",
+      "eventTimestamp": "2026-11-26T15:29:59.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    },
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.380",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": true,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Flame loss immediately after flame formation"
+      },
+      "createdAt": "2026-11-26T01:18:02.667Z",
+      "eventTimestamp": "2026-11-26T01:17:32.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    },
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.380",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": false,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Flame loss immediately after flame formation"
+      },
+      "createdAt": "2026-11-21T22:07:26.054Z",
+      "eventTimestamp": "2026-11-21T22:06:55.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    },
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.380",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": true,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Flame loss immediately after flame formation"
+      },
+      "createdAt": "2026-11-21T21:40:01.372Z",
+      "eventTimestamp": "2026-11-21T21:39:30.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    },
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.380",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": false,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Flame loss immediately after flame formation"
+      },
+      "createdAt": "2026-11-21T14:45:41.816Z",
+      "eventTimestamp": "2026-11-21T14:45:11.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    },
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.380",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": true,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Flame loss immediately after flame formation"
+      },
+      "createdAt": "2026-11-21T10:38:30.047Z",
+      "eventTimestamp": "2026-11-21T10:37:59.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    },
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.357",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": false,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Insufficient gas supply"
+      },
+      "createdAt": "2026-06-24T19:48:46.824Z",
+      "eventTimestamp": "2026-06-24T19:48:16.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    },
+    {
+      "eventType": "device-error",
+      "gatewaySerial": "################",
+      "body": {
+        "errorCode": "F.357",
+        "deviceId": "0",
+        "modelId": "E3_Vitodens_100_NA_0521",
+        "active": true,
+        "equipmentType": "Boiler",
+        "errorEventType": "Error",
+        "errorDescription": "Insufficient gas supply"
+      },
+      "createdAt": "2026-06-24T18:07:26.856Z",
+      "eventTimestamp": "2026-06-24T18:06:56.000Z",
+      "editedBy": "system",
+      "origin": "system",
+      "audiences": null
+    }
+  ]
+}
